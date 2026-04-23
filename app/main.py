@@ -11,9 +11,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+import os
+
+# Cargar variables de entorno (Local y Prod)
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+MONGODB_URI = os.getenv("MONGODB_URI")
+BACKEND_PROD_URL = os.getenv("BACKEND_PROD_URL", "https://tu-backend-prod.azurewebsites.net")
+
+origins = [
+    "http://localhost:8080",
+    BACKEND_PROD_URL
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
