@@ -34,7 +34,7 @@ async def assist_workflow(request: WorkflowAssistantRequest):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-from app.models.schemas import LogsTramitesRequest, SugerirCamposRequest
+from app.models.schemas import LogsTramitesRequest, SugerirCamposRequest, ResumenTramiteRequest
 
 @router.post("/suggest-fields")
 async def suggest_fields(request: SugerirCamposRequest):
@@ -64,5 +64,23 @@ async def analyze_logs(request: LogsTramitesRequest):
             return JSONResponse(content=json.loads(json_output))
         except:
             return JSONResponse(content={"insights": [], "planAccion": []})
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+@router.post("/summarize-tramite")
+async def summarize_tramite(request: ResumenTramiteRequest):
+    try:
+        service = get_claude_service()
+        json_output = await service.resumir_tramite(request.tramiteCompacto)
+        try:
+            return JSONResponse(content=json.loads(json_output))
+        except:
+            return JSONResponse(content={
+                "titulo": "Resumen no disponible",
+                "estado": "Completado",
+                "resumen": "No fue posible generar el resumen.",
+                "pasosClave": [],
+                "conclusion": "Contacte a la institución para más detalles."
+            })
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})

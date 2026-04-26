@@ -24,3 +24,6 @@ class SugerirCamposRequest(BaseModel):
     schemaJson: str
     textoUsuario: str
     modo: str
+
+class ResumenTramiteRequest(BaseModel):
+    tramiteCompacto: str
