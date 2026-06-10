@@ -27,3 +27,6 @@ class SugerirCamposRequest(BaseModel):
 
 class ResumenTramiteRequest(BaseModel):
     tramiteCompacto: str
+
+class ChatReportRequest(BaseModel):
+    historial: List[Dict[str, str]]
