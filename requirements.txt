@@ -3,3 +3,10 @@ uvicorn
 httpx
 pydantic
 python-dotenv
+scikit-learn
+pandas
+anthropic
+openpyxl
+reportlab
+python-docx
+matplotlib

@@ -4,10 +4,10 @@ import httpx
 from typing import List, Dict, Any, Optional
 from app.models.schemas import DepartamentoInfo
 
-WORKFLOW_MIN_OUTPUT_TOKENS = 1500
-WORKFLOW_MAX_OUTPUT_TOKENS = 2700
-WORKFLOW_REPAIR_MIN_TOKENS = 1000
-WORKFLOW_REPAIR_MAX_TOKENS = 2000
+WORKFLOW_MIN_OUTPUT_TOKENS = 2500
+WORKFLOW_MAX_OUTPUT_TOKENS = 4000
+WORKFLOW_REPAIR_MIN_TOKENS = 2000
+WORKFLOW_REPAIR_MAX_TOKENS = 3000
 
 class ClaudeAiService:
     def __init__(self):
@@ -249,46 +249,63 @@ SOLO JSON valido compacto. Repara workflow truncado/malformado. Campos requerido
 
     async def generar_workflow(self, politica_negocio: str, departamentos: List[DepartamentoInfo]) -> str:
         string_de_departamentos_bd = ", ".join([f"{d.nombre} (ID: {d.id})" for d in departamentos])
+        schema_exacto = '{"nombreTramite":"","descripcionTramite":"","categoria":"INTERNO|EXTERNO","costoBase":0,"formularioCliente":{"type":"object","properties":{},"required":[]},"pasos":[{"id":"paso_N","tipo":"ACTIVIDAD|DECISION|FORK|JOIN","departamentoId":"id|null","nombrePaso":"","formularioJson":{}|null,"siguientes":{}}]}'
         
-        system_prompt = f"""SOLO JSON VÁLIDO. Sin markdown, sin explicaciones.
+        system_prompt = """SOLO JSON VÁLIDO. Sin markdown, sin explicaciones.
 
 SCHEMA EXACTO:
-{{"nombreTramite":"","descripcionTramite":"","categoria":"INTERNO|EXTERNO","costoBase":0,"formularioCliente":{{"type":"object","properties":{{}},"required":[]}},"pasos":[{{"id":"paso_N","tipo":"ACTIVIDAD|DECISION","departamentoId":"id|null","nombrePaso":"","formularioJson":{{}}|null,"siguientes":{{}}}}]}}
+[SCHEMA_EXACTO]
 
-DEPARTAMENTOS DISPONIBLES: [{string_de_departamentos_bd}]
+DEPARTAMENTOS DISPONIBLES: [[DEPARTAMENTOS_DISPONIBLES]]
 
 === REGLAS CRÍTICAS DE ROUTING (SEGUIR AL PIE DE LA LETRA) ===
 
 ACTIVIDAD (paso con formulario, un solo camino posible):
-- SIEMPRE siguientes={{"default":"paso_N"}} para avanzar al siguiente paso
+- SIEMPRE siguientes={"default":"paso_N"} para avanzar al siguiente paso
 - SIEMPRE formularioJson con properties y required
-- Si es el ÚLTIMO paso del trámite: siguientes={{}}
-- NUNCA poner múltiples opciones como {{"Opcion1":"paso_X","Opcion2":"paso_Y"}} en ACTIVIDAD
+- Si es el ÚLTIMO paso del trámite: siguientes={}
+- NUNCA poner múltiples opciones como {"Opcion1":"paso_X","Opcion2":"paso_Y"} en ACTIVIDAD
 
 DECISION (bifurcación, el usuario elige un camino):
-- siguientes con nombres descriptivos: {{"Aprobado":"paso_X","Rechazado":"paso_Y"}}
+- siguientes con nombres descriptivos: {"Aprobado":"paso_X","Rechazado":"paso_Y"}
 - formularioJson SIEMPRE null (las decisiones no tienen formulario)
 - Los nombres de las opciones deben ser legibles para humanos
 
+FORK (división en paralelo a múltiples tareas concurrentes):
+- formularioJson SIEMPRE null.
+- siguientes contiene TODAS las ramas paralelas sin "default", usando IDs únicos: {"rama1":"paso_X","rama2":"paso_Y"}
+
+JOIN (sincronización de tareas paralelas):
+- formularioJson SIEMPRE null.
+- siguientes={"default":"paso_Z"} para converger y seguir.
+
 ERROR COMÚN A EVITAR:
 - SI un paso necesita que alguien elija entre opciones → DEBE ser DECISION, NO ACTIVIDAD
-- Una ACTIVIDAD con siguientes={{"Disponible":"paso_3","No Disponible":"paso_4"}} está MAL → debe ser DECISION
+- Una ACTIVIDAD con siguientes={"Disponible":"paso_3","No Disponible":"paso_4"} está MAL → debe ser DECISION
 
 CAMPO departamentoId:
 - null = paso asignado al CLIENTE (lo responde desde la app móvil)
 - "id_depto" = paso asignado a un FUNCIONARIO de ese departamento
 
 TIPOS DE CAMPO EN formularioJson.properties:
-- {{"type":"string"}} = texto libre
-- {{"type":"number"}} = numérico
-- {{"type":"boolean"}} = sí/no
-- {{"type":"string","format":"date"}} = selector de fecha
-- {{"type":"string","format":"date-time"}} = fecha y hora
-- {{"type":"file"}} = archivo adjunto (PDF, imagen, etc)
-- {{"type":"string","enum":["op1","op2"]}} = lista desplegable
+- {"type":"string"} = texto libre
+- {"type":"number"} = numérico
+- {"type":"boolean"} = sí/no
+- {"type":"string","format":"date"} = selector de fecha
+- {"type":"string","format":"date-time"} = fecha y hora
+- {"type":"ARCHIVO_ESTATICO"} = archivo final (PDF, imagen). OBLIGATORIO incluir "formatosPermitidos":[".pdf",".jpg"], "tamanoMaximoMB":5, y "permisosPorDefecto".
+- {"type":"DOCUMENTO_COLABORATIVO"} = documento colaborativo para funcionarios. OBLIGATORIO incluir "formatosPermitidos":["WORD","EXCEL"] y "permisosPorDefecto". ¡PROHIBIDO ROL CLIENTE!
+
+REGLAS PARA permisosPorDefecto:
+- Estructura: [{"role": "VALOR", "permission": "LECTURA|EDICION|AMBOS"}]
+- VALOR para role: SOLO puedes usar "CLIENTE" o un ID válido de DEPARTAMENTOS DISPONIBLES.
+- IMPORTANTE: Para DOCUMENTO_COLABORATIVO, el role "CLIENTE" está TOTALMENTE PROHIBIDO.
+- {"type":"string","enum":["op1","op2"]} = lista desplegable
+- {"type":"grid"} = grid (tabla dinámica para múltiples registros)
 
 FORMULARIO CLIENTE (formularioCliente):
-- Datos que el cliente llena AL INICIAR el trámite. Mismos tipos de campo.
+- Datos que el cliente llena AL INICIAR el trámite. Mismos tipos de campo EXCEPTO DOCUMENTO_COLABORATIVO.
+- REGLA CRÍTICA: El CLIENTE (departamentoId: null) NUNCA debe tener campos de tipo DOCUMENTO_COLABORATIVO. Si requiere adjuntos, usa ARCHIVO_ESTATICO.
 
 REGLAS:
 1. INTERNO => costoBase=0
@@ -296,9 +313,11 @@ REGLAS:
 3. NO crear bucles infinitos. Si un paso rechaza y pide corrección al cliente, debe tener un límite (máx 1 vuelta atrás).
 4. Nombres y descripciones MUY concisos.
 5. VALORES EXACTOS EN ESPAÑOL (NUNCA en inglés):
-   - tipo: solo "ACTIVIDAD" o "DECISION" (NO "ACTIVITY", NO "DECISION_NODE", NO "TASK")
+   - tipo: solo "ACTIVIDAD", "DECISION", "FORK" o "JOIN" (NO "ACTIVITY", NO "DECISION_NODE", NO "TASK")
    - categoria: solo "INTERNO" o "EXTERNO" (NO "INTERNAL", NO "EXTERNAL")
 """
+        system_prompt = system_prompt.replace("[SCHEMA_EXACTO]", schema_exacto)
+        system_prompt = system_prompt.replace("[DEPARTAMENTOS_DISPONIBLES]", string_de_departamentos_bd)
         workflow_budget = WORKFLOW_MAX_OUTPUT_TOKENS
         raw_response = await self._send_to_claude(system_prompt, politica_negocio, workflow_budget)
         
@@ -323,37 +342,49 @@ REGLAS:
         
         workflow_draft_json = json.dumps(workflow_draft) if workflow_draft else "{}"
 
-        system_prompt = f"""SOLO JSON. Asiste operador en editor de workflows. Detecta inconsistencias, propone correcciones.
-Deptos permitidos:[{departamentos_disponibles}].
+        formato_asistente = '{"respuesta":"texto breve","guiaUso":[],"correccionesDetectadas":[{"severidad":"ALTA|MEDIA|BAJA","titulo":"","detalle":"","accion":""}],"workflowSugerido":{"nombreTramite":"","descripcionTramite":"","categoria":"","costoBase":0,"formularioCliente":{},"pasos":[]}|null}'
+
+        system_prompt = """SOLO JSON. Asiste operador en editor de workflows. Detecta inconsistencias, propone correcciones.
+Deptos permitidos:[[DEPARTAMENTOS_DISPONIBLES]].
 VALORES EXACTOS EN ESPAÑOL (NUNCA inglés):
-- tipo: solo "ACTIVIDAD" o "DECISION" (NO "ACTIVITY", NO "TASK")
+- tipo: solo "ACTIVIDAD", "DECISION", "FORK" o "JOIN" (NO "ACTIVITY", NO "TASK")
 - categoria: solo "INTERNO" o "EXTERNO" (NO "INTERNAL")
 
 === REGLAS CRÍTICAS DE ROUTING ===
-ACTIVIDAD: siguientes SIEMPRE debe ser {{"default":"paso_N"}} o {{}} (fin).
-- Si ves una ACTIVIDAD con múltiples rutas como {{"Opcion1":"paso_X","Opcion2":"paso_Y"}}, eso es un ERROR.
+ACTIVIDAD: siguientes SIEMPRE debe ser {"default":"paso_N"} o {} (fin).
+- Si ves una ACTIVIDAD con múltiples rutas como {"Opcion1":"paso_X","Opcion2":"paso_Y"}, eso es un ERROR.
 - Corrección: cambiar el tipo a DECISION y poner formularioJson=null.
 
-DECISION: siguientes con nombres descriptivos {{"Aprobado":"paso_X","Rechazado":"paso_Y"}}.
+DECISION: siguientes con nombres descriptivos {"Aprobado":"paso_X","Rechazado":"paso_Y"}.
 - formularioJson DEBE ser null.
 - Los nombres de las opciones son las etiquetas que verá el usuario.
 
+FORK y JOIN:
+- formularioJson SIEMPRE null.
+- FORK: debe tener múltiples rutas en siguientes para el paralelismo.
+- JOIN: debe unificarlos hacia una única ruta {"default":"paso_N"}.
+
 VALIDACIONES:
 - departamentoId null = Paso del CLIENTE. VÁLIDO.
-- tipo DECISION = formularioJson DEBE ser null. CORRECTO.
+- tipo DECISION, FORK, JOIN = formularioJson DEBE ser null. CORRECTO.
 - tipo ACTIVIDAD = formularioJson requerido con properties y required.
-- ACTIVIDAD lineal: siguientes={{"default":"paso_N"}}. OBLIGATORIO.
-- ACTIVIDAD final: siguientes={{}} (vacío = FIN del trámite).
+- ACTIVIDAD lineal: siguientes={"default":"paso_N"}. OBLIGATORIO.
+- ACTIVIDAD final: siguientes={} (vacío = FIN del trámite).
 - PROHIBIDO poner valores de datos como claves de siguientes.
-- Tipos de campo válidos: string, number, boolean, file, string+format:date, string+format:date-time, string+enum.
+- Tipos de campo válidos: string, number, boolean, ARCHIVO_ESTATICO, DOCUMENTO_COLABORATIVO, string+format:date, string+format:date-time, string+enum, grid.
+- REGLA CRÍTICA: Si departamentoId es null (CLIENTE) y detectas un campo DOCUMENTO_COLABORATIVO, es un ERROR SEVERO. Corrección: Cambiarlo a ARCHIVO_ESTATICO. Los clientes NO pueden acceder a colaborativos.
+- OBLIGATORIO: ARCHIVO_ESTATICO y DOCUMENTO_COLABORATIVO deben tener "formatosPermitidos" y "permisosPorDefecto".
+- REGLAS permisosPorDefecto: [{"role": "VALOR", "permission": "LECTURA|EDICION|AMBOS"}]. El role SOLO puede ser "CLIENTE" o un ID de DEPARTAMENTOS DISPONIBLES. ¡Para DOCUMENTO_COLABORATIVO, "CLIENTE" está PROHIBIDO!
 - INTERNO => costoBase=0. No inventar IDs de departamentos.
 - Bucles: máx 1 vuelta atrás permitida para correcciones.
-Formato:{{\"respuesta\":\"texto breve\",\"guiaUso\":[],\"correccionesDetectadas\":[{{\"severidad\":\"ALTA|MEDIA|BAJA\",\"titulo\":\"\",\"detalle\":\"\",\"accion\":\"\"}}],\"workflowSugerido\":{{\"nombreTramite\":\"\",\"descripcionTramite\":\"\",\"categoria\":\"\",\"costoBase\":0,\"formularioCliente\":{{}},\"pasos\":[]}}|null}}
+Formato:[FORMATO_ASISTENTE]
 Sin cambios estructurales=workflowSugerido null. Sin markdown.
 """
+        system_prompt = system_prompt.replace("[DEPARTAMENTOS_DISPONIBLES]", departamentos_disponibles)
+        system_prompt = system_prompt.replace("[FORMATO_ASISTENTE]", formato_asistente)
         
         user_prompt = f"role:{operator_role or 'ADMIN'} mode:{mode or 'create'}\nWORKFLOW:{workflow_draft_json}\nCONSULTA:{prompt}"
-        budget = 3000
+        budget = 4000
         
         raw_response = await self._send_to_claude(system_prompt, user_prompt, budget)
         normalized = self._normalize_json_object(raw_response)
@@ -371,12 +402,15 @@ Sin cambios estructurales=workflowSugerido null. Sin markdown.
         return json.dumps(fallback)
 
     async def analizar_logs_tramites(self, logs_compactos_json: str, horas_esperadas_promedio: float) -> str:
+        schema_exacto = '{"insights":[{"severidad":"","titulo":"","descripcion":"","departamentoId":null,"funcionarioId":null,"retrasoHoras":0,"causaProbable":""}],"planAccion":[{"prioridad":"ALTA|MEDIA|BAJA","accion":"","objetivo":"","plazoHoras":""}]}'
         system_prompt = """
 SOLO JSON. Analiza logs de tiempos de tramites. Identifica deptos que superen promedio, sugiere causa(FALTA_PERSONAL|COMPLEJIDAD_FORMULARIO|MIXTO), plan de accion.
 departamentoId="CLIENTE"=tiempo externo, no retraso interno. Severidad: CRITICO>=24h, ADVERTENCIA>=8h<24h, INFO=resto.
-Schema:{"insights":[{"severidad":"","titulo":"","descripcion":"","departamentoId":null,"funcionarioId":null,"retrasoHoras":0,"causaProbable":""}],"planAccion":[{"prioridad":"ALTA|MEDIA|BAJA","accion":"","objetivo":"","plazoHoras":""}]}
+Schema:[SCHEMA_EXACTO]
 Usa horasEsperadasPromedio como referencia. Sin markdown.
 """
+        system_prompt = system_prompt.replace("[SCHEMA_EXACTO]", schema_exacto)
+
         user_prompt = f"horasEsperadasPromedio={horas_esperadas_promedio}\n{logs_compactos_json}"
         budget = self._estimate_tokens_by_input_size(user_prompt, 900, 1700, 300)
         raw_response = await self._send_to_claude(system_prompt, user_prompt, budget)
@@ -388,7 +422,8 @@ Usa horasEsperadasPromedio como referencia. Sin markdown.
 Formato:{"sugerencia":{"campo":valor},"observacion":"texto corto"}
 Solo campos existentes en properties del schema. Omite si faltan datos.
 Tipos: string=texto, number=numérico, boolean=true/false, format:date=YYYY-MM-DD, format:date-time=YYYY-MM-DDTHH:mm:ss.
-IGNORA campos tipo 'file' (son archivos, no autocompletables).
+CRÍTICO PARA GRIDS: Si un campo es de type 'grid' o 'array', DEBES generar un arreglo de objetos JSON (una lista con múltiples registros) según el esquema definido en 'items.properties'. Si el usuario menciona varios elementos, crea un objeto en la lista para CADA elemento detectado. Ejemplo: "grid_productos": [{"nombre": "A", "precio": 10}, {"nombre": "B", "precio": 20}]
+IGNORA campos tipo 'file', 'ARCHIVO_ESTATICO' y 'DOCUMENTO_COLABORATIVO' (son archivos, no autocompletables).
 Enum=solo valores permitidos. Sin datos útiles=sugerencia vacía. Sin markdown.
 """
         user_prompt = f"modo={modo}\nSCHEMA:\n{schema_json}\n\nTEXTO_USUARIO:\n{texto_usuario}"
@@ -398,19 +433,23 @@ Enum=solo valores permitidos. Sin datos útiles=sugerencia vacía. Sin markdown.
         return normalized if normalized else raw_response
 
     async def resumir_tramite(self, tramite_compacto: str) -> str:
+        schema_exacto = '{"titulo":"nombre del trámite","estado":"Aprobado|Rechazado|Completado","resumen":"descripción breve de qué ocurrió en 2-3 oraciones","pasosClave":[{"nombre":"nombre del paso","resultado":"qué se determinó"}],"conclusion":"mensaje final para el cliente, próximos pasos si los hay"}'
         system_prompt = """SOLO JSON VÁLIDO. Genera resumen ejecutivo de trámite finalizado para el CLIENTE.
 PROHIBIDO revelar: IDs internos, nombres de funcionarios, nombres de departamentos internos, datos sensibles.
 Sé breve, claro y empático. Usa lenguaje simple orientado al ciudadano.
 
 SCHEMA EXACTO (no añadir campos extra):
-{"titulo":"nombre del trámite","estado":"Aprobado|Rechazado|Completado","resumen":"descripción breve de qué ocurrió en 2-3 oraciones","pasosClave":[{"nombre":"nombre del paso","resultado":"qué se determinó"}],"conclusion":"mensaje final para el cliente, próximos pasos si los hay"}
+[SCHEMA_EXACTO]
 
 REGLAS:
 - pasosClave: máximo 5 elementos, solo los más relevantes.
+- Si el trámite contiene datos de tipo 'grid' o tablas (listas de objetos), RESÚMELOS en una frase corta, NO imprimas la tabla entera en el resultado.
 - No incluir pasos técnicos internos irrelevantes para el cliente.
 - Si hubo rechazo, explicar el motivo de forma constructiva.
 - conclusion debe ser un cierre amable y útil.
 - Sin markdown, sin texto fuera del JSON."""
+        system_prompt = system_prompt.replace("[SCHEMA_EXACTO]", schema_exacto)
+
 
         budget = 800
         raw_response = await self._send_to_claude(system_prompt, tramite_compacto, budget)
