@@ -31,10 +31,8 @@ class ReportGeneratorService:
         self.api_key = os.getenv("CLAUDE_API_KEY")
         self.client = AsyncAnthropic(api_key=self.api_key)
         
-        # Como usas docker-compose, ambos contenedores están en la misma red.
-        # El contenedor de Spring Boot se llama "backend", así que usamos ese nombre.
-        backend_host = os.getenv("BACKEND_INTERNAL_HOST", "backend:8080")
-        self.backend_url = f"http://{backend_host}/api/tramites/report-data"
+        backend_host = os.getenv("BACKEND_PROD_URL", "http://backend:8080")
+        self.backend_url = f"{backend_host}/api/tramites/report-data"
 
     async def procesar_chat(self, historial: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -106,7 +104,9 @@ NO DEBES añadir ningún texto adicional ni markdown. Solo el objeto JSON crudo.
             # Capturar errores de red específicos con Anthropic y lanzarlo para que routes.py mande HTTP 500
             raise Exception(f"Error de red al contactar con la IA de Anthropic: {str(network_e)}")
         except Exception as e:
-            return {"estado": "INCOMPLETO", "mensaje_usuario": "Lo siento, no pude entender tu solicitud correctamente. Por favor, sé más específico sobre el reporte que necesitas."}
+            import traceback
+            traceback.print_exc()
+            return {"estado": "INCOMPLETO", "mensaje_usuario": f"Lo siento, ocurrió un error interno al generar el reporte: {str(e)}"}
 
     async def _generar_reporte_fisico(self, response_json: Dict[str, Any]):
         parametros = response_json.get("parametros_query", {})
